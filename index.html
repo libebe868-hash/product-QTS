@@ -6,6 +6,7 @@
   <title>三诚螺纹护套实时库存大屏</title>
   <link rel="stylesheet" href="assets/style.css">
   <script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 </head>
 <body>
@@ -23,10 +24,10 @@
 
     <div id="overview" class="panel active">
       <div class="grid">
-        <div class="card total"><div class="num" id="totalItems">-</div><div class="label">总SKU数</div></div>
-        <div class="card total"><div class="num" id="totalStock">-</div><div class="label">总库存件数</div></div>
-        <div class="card total"><div class="num" id="totalTypes">-</div><div class="label">总型号数</div></div>
-        <div class="card total"><div class="num" id="activeTypes">-</div><div class="label">有库存型号</div></div>
+        <div class="card total"><div class="num" id="totalItems">0</div><div class="label">总SKU数</div></div>
+        <div class="card total"><div class="num" id="totalStock">0</div><div class="label">总库存件数</div></div>
+        <div class="card total"><div class="num" id="totalTypes">0</div><div class="label">总型号数</div></div>
+        <div class="card total"><div class="num" id="activeTypes">0</div><div class="label">有库存型号</div></div>
       </div>
       <div class="charts">
         <div class="chart-box"><h3>各型号库存占比</h3><div id="pieChart" style="height:400px;"></div></div>
@@ -36,19 +37,19 @@
 
     <div id="ranking" class="panel">
       <div class="search-bar">
-        <input type="text" id="searchInput" placeholder="搜索型号或规格（如：302、M6、1215黄铜）">
+        <input type="text" id="searchInput" placeholder="全局搜索：型号 / 规格 / 材质（如：302、M6、1215黄铜）">
         <button id="exportBtn">导出CSV</button>
       </div>
-      <div id="rankingList"></div>
+      <div id="rankingList" class="ranking-list"></div>
     </div>
 
     <div id="detail" class="panel">
       <div style="margin-bottom:15px;">
         <select id="sheetSelect"></select>
-        <span style="margin-left:20px;color:#aaa;">共 <span id="itemCount">0</span> 条规格</span>
+        <span style="margin-left:20px;color:#aaa;">共 <span id="itemCount">0</span> 条规格（智能过滤中）</span>
       </div>
       <div class="search-bar">
-        <input type="text" id="detailSearch" placeholder="智能搜索：M3 → M3*0.5 → M3*0.5-L6（逐步精准）">
+        <input type="text" id="detailSearch" placeholder="智能搜索：M3 → M3*0.5 → M3*0.5-L6 → 完整规格（逐步精准）">
         <button id="detailExportBtn">导出当前型号</button>
       </div>
       <table id="detailTable">
@@ -59,128 +60,212 @@
   </div>
 
   <script>
+    let workbook = null;
     let allData = {};
-    let currentSheetData = [];
+    let currentSheetData = [];  // 当前选中的型号全部数据（用于智能搜索）
 
-    function safeSetText(id, text) {
-      const el = document.getElementById(id);
-      if (el) el.textContent = text;
-    }
-
-    async function loadData() {
-      try {
-        // 极速加载：直接从 jsDelivr CDN（中国节点）拉 JSON
-        const resp = await fetch('https://cdn.jsdelivr.net/gh/libebe868-hash/product-QTY@latest/inventory-data.json?t=' + Date.now());
-        if (!resp.ok) throw new Error("JSON 未找到");
-        
-        allData = await resp.json();
-        safeSetText('updateTime', "数据更新时间: " + new Date().toLocaleString('zh-CN'));
-        renderAll();
-        console.log("数据加载成功（极速模式）");
-      } catch (e) {
-        safeSetText('updateTime', "加载失败，请检查网络或联系管理员");
-        console.error(e);
+    async function loadExcel() {
+      const urls = ["data.xlsx", "螺纹护套库存明细 202512(1).xlsx"];
+      for (let url of urls) {
+        try {
+          const resp = await fetch(url + "?t=" + Date.now());
+          if (resp.ok) {
+            workbook = XLSX.read(await resp.arrayBuffer(), { type: "array" });
+            document.getElementById("updateTime").textContent = "数据更新时间: " + new Date().toLocaleString('zh-CN');
+            parseAllSheets();
+            return;
+          }
+        } catch(e) {}
       }
+      alert("未找到 data.xlsx 文件！");
     }
 
-    function renderAll() {
-      const allItems = Object.values(allData).flat();
-      const hasStock = allItems.filter(i => i.stock > 0);
-      
-      safeSetText('totalItems', hasStock.length.toLocaleString());
-      safeSetText('totalStock', hasStock.reduce((s,i)=>s+i.stock,0).toLocaleString());
-      safeSetText('totalTypes', Object.keys(allData).length);
-      safeSetText('activeTypes', Object.keys(allData).filter(k => allData[k].some(i=>i.stock>0)).length);
+    function parseAllSheets() {
+      allData = {};
+      let totalStock = 0, totalItems = 0, activeTypes = 0;
+      const typeMap = {};
 
-      renderPieChart();
+      workbook.SheetNames.forEach(name => {
+        if (["总汇","Sheet1"].includes(name) || name.includes("空白")) return;
+        const sheet = workbook.Sheets[name];
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+        const items = [];
+
+        for (let i = 4; i < rows.length; i += 2) {
+          const row = rows[i] || [];
+          if (!row[2]) continue;
+
+          const stock = parseInt(row[6]) || parseInt(row[7]) || parseInt(row[5]) || 0;
+          const type = (row[1] || name).toString().trim();
+          const item = {
+            seq: row[0] || '',
+            type: type,
+            spec: row[2].toString().trim(),
+            material: (row[3] || '').toString().trim(),
+            stock: stock,
+            unit: row[5] || 'pcs'
+          };
+          items.push(item);
+
+          if (stock > 0) {
+            totalStock += stock;
+            totalItems++;
+            typeMap[type] = (typeMap[type] || 0) + stock;
+            if (!typeMap[type + "_f"]) { activeTypes++; typeMap[type + "_f"] = true; }
+          }
+        }
+        if (items.length) allData[name] = items;
+      });
+
+      document.getElementById("totalItems").textContent = totalItems.toLocaleString();
+      document.getElementById("totalStock").textContent = totalStock.toLocaleString();
+      document.getElementById("totalTypes").textContent = Object.keys(allData).length;
+      document.getElementById("activeTypes").textContent = activeTypes;
+
+      renderPieChart(typeMap);
       renderBarChart();
       renderRanking();
       renderTypeSelect();
     }
 
-    function renderPieChart() {
-      const map = {};
-      Object.values(allData).flat().forEach(i => {
-        if (i.stock > 0) map[i.type] = (map[i.type]||0) + i.stock;
-      });
-      const data = Object.entries(map).map(([k,v]) => ({name:k,value:v}));
+    function renderPieChart(map) {
+      const data = Object.keys(map).filter(k => !k.endsWith("_f")).map(k => ({ name: k, value: map[k] }));
       echarts.init(document.getElementById("pieChart")).setOption({
-        tooltip:{trigger:'item'},legend:{orient:'vertical',right:10,top:'center',textStyle:{color:'#fff'}},
-        series:[{type:'pie',radius:['30%','70%'],center:['40%','50%'],data}]
+        tooltip: { trigger: 'item' },
+        legend: { orient: 'vertical', right: 10, top: 'center', textStyle: { color: '#fff' } },
+        series: [{ type: 'pie', radius: ['30%', '70%'], center: ['40%', '50%'], data }]
       });
     }
 
     function renderBarChart() {
-      const top15 = Object.values(allData).flat().filter(i=>i.stock>0).sort((a,b)=>b.stock-a.stock).slice(0,15);
-      const labels = top15.map(i=>i.spec.length>20?i.spec.slice(0,20)+'...':i.spec);
+      const top15 = Object.values(allData).flat()
+        .filter(i => i.stock > 0)
+        .sort((a, b) => b.stock - a.stock)
+        .slice(0, 15);
+
+      const labels = top15.map(i => i.spec.length > 20 ? i.spec.slice(0,20) + '...' : i.spec);
+
       echarts.init(document.getElementById("barChart")).setOption({
-        tooltip:{trigger:'axis'},grid:{left:60,right:20,top:40,bottom:60},
-        xAxis:{type:'value',axisLabel:{color:'#ccc'}},
-        yAxis:{type:'category',data:labels,axisLabel:{color:'#fff'}},
-        series:[{type:'bar',data:top15.map(i=>({value:i.stock,itemStyle:{color:i.stock<1000?'#ff4444':'#00d4ff'}})),label:{show:true,position:'right',color:'#fff'}}]
+        tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+        grid: { left: 60, right: 20, top: 40, bottom: 60 },
+        xAxis: { type: 'value', axisLabel: { color: '#ccc' } },
+        yAxis: { type: 'category', data: labels, axisLabel: { color: '#fff' } },
+        series: [{
+          type: 'bar',
+          data: top15.map(i => ({ value: i.stock, itemStyle: { color: i.stock < 1000 ? '#ff4444' : '#00d4ff' } })),
+          label: { show: true, position: 'right', color: '#fff' }
+        }]
       });
     }
 
-    function renderRanking(items=null) {
-      let list = items || Object.values(allData).flat().filter(i=>i.stock>0).sort((a,b)=>b.stock-a.stock);
-      document.getElementById("rankingList").innerHTML = list.slice(0,100).map((i,idx)=>`
-        <div class="rank-item ${idx<3?'top3':''} ${i.stock<1000?'low-stock':''}">
-          <span class="rank-num">${idx+1}</span>
-          <span class="type ${idx<3?'top3-text':''}">${i.type}</span>
-          <span class="spec ${idx<3?'top3-text':''}">${i.spec}</span>
-          <span class="material ${idx<3?'top3-text':''}">${i.material||'-'}</span>
-          <span class="stock ${idx<3?'top3-text':''}">${i.stock.toLocaleString()}${i.stock<1000?' 低库存':''}</span>
-        </div>`).join('');
+    function renderRanking(filterItems = null) {
+      let items = filterItems || Object.values(allData).flat();
+      items = items.filter(i => i.stock > 0).sort((a,b) => b.stock - a.stock);
+
+      const html = items.slice(0, 100).map((item, idx) => {
+        const isTop3 = idx < 3;
+        const isLow = item.stock < 1000;
+        return `
+          <div class="rank-item ${isTop3 ? 'top3' : ''} ${isLow ? 'low-stock' : ''}">
+            <span class="rank-num">${idx + 1}</span>
+            <span class="type ${isTop3 ? 'top3-text' : ''}">${item.type}</span>
+            <span class="spec ${isTop3 ? 'top3-text' : ''}">${item.spec}</span>
+            <span class="material ${isTop3 ? 'top3-text' : ''}">${item.material || '-'}</span>
+            <span class="stock ${isTop3 ? 'top3-text' : ''}">${item.stock.toLocaleString()}${isLow ? ' 低库存' : ''}</span>
+          </div>`;
+      }).join('');
+      document.getElementById("rankingList").innerHTML = html;
     }
 
     function renderTypeSelect() {
-      const s = document.getElementById("sheetSelect");
-      const keys = Object.keys(allData).sort();
-      s.innerHTML = keys.map(k=>`<option value="${k}">${k}（${allData[k].length}规格）</option>`).join('');
-      s.onchange = () => { currentSheetData = allData[s.value]; renderDetailTable(currentSheetData); };
-      currentSheetData = allData[keys[0]];
-      renderDetailTable(currentSheetData);
+      const select = document.getElementById("sheetSelect");
+      const names = Object.keys(allData).sort();
+      select.innerHTML = names.map(n => `<option value="${n}">${n}（${allData[n].length}规格）</option>`).join('');
+      select.onchange = () => {
+        currentSheetData = allData[select.value] || [];
+        renderDetailTable(currentSheetData, document.getElementById("detailSearch").value);
+      };
+      currentSheetData = allData[names[0]] || [];
+      renderDetailTable(currentSheetData, '');
     }
 
-    function renderDetailTable(data, kw='') {
-      let filtered = kw ? data.filter(i=>i.spec.toUpperCase().includes(kw.toUpperCase())) : data;
-      document.getElementById("itemCount").textContent = filtered.length;
-      document.querySelector("#detailTable tbody").innerHTML = filtered.map(i=>{
-        let spec = i.spec;
-        if(kw){const r=new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`,'gi');spec=spec.replace(r,'<mark class="highlight">$1</mark>');}
-        return `<tr class="${i.stock<1000&&i.stock>0?'low-stock':''}">
-          <td>${i.seq}</td><td>${i.type}</td><td>${spec}</td><td>${i.material||'-'}</td>
-          <td class="stock">${i.stock.toLocaleString()}</td><td>${i.unit}</td>
-        </tr>`;
+    // 终极智能搜索：逐步精准过滤
+    function renderDetailTable(data, keyword = '') {
+      let filtered = data;
+
+      if (keyword.trim()) {
+        const kw = keyword.trim().toUpperCase();
+        // 逐步精准：越长越精准
+        filtered = data.filter(item => 
+          item.spec.toUpperCase().includes(kw)
+        );
+      }
+
+      document.getElementById("itemCount").textContent = filtered.length + (keyword ? `（已筛选）` : '');
+
+      const tbody = document.querySelector("#detailTable tbody");
+      tbody.innerHTML = filtered.map(item => {
+        let displaySpec = item.spec;
+        if (keyword) {
+          const regex = new RegExp(`(${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+          displaySpec = displaySpec.replace(regex, '<mark class="highlight">$1</mark>');
+        }
+        return `
+          <tr class="${item.stock < 1000 && item.stock > 0 ? 'low-stock' : ''}">
+            <td>${item.seq}</td>
+            <td>${item.type}</td>
+            <td>${displaySpec}</td>
+            <td>${item.material || '-'}</td>
+            <td class="stock">${item.stock.toLocaleString()}</td>
+            <td>${item.unit}</td>
+          </tr>
+        `;
       }).join('');
     }
 
-    document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
-      document.querySelectorAll(".tab,.panel").forEach(e=>e.classList.remove("active"));
-      t.classList.add("active");
-      document.getElementById(t.dataset.tab).classList.add("active");
-    });
-
-    document.getElementById("searchInput").oninput=e=>{
-      const kw=e.target.value.toLowerCase();
-      if(!kw) return renderRanking();
-      renderRanking(Object.values(allData).flat().filter(i=>
-        i.type.toLowerCase().includes(kw)||i.spec.toLowerCase().includes(kw)||i.material.toLowerCase().includes(kw)
-      ));
+    // 全局搜索
+    document.getElementById("searchInput").oninput = e => {
+      const kw = e.target.value.toLowerCase();
+      if (!kw) return renderRanking();
+      const filtered = Object.values(allData).flat().filter(i =>
+        i.type.toLowerCase().includes(kw) ||
+        i.spec.toLowerCase().includes(kw) ||
+        i.material.toLowerCase().includes(kw)
+      );
+      renderRanking(filtered);
     };
 
-    document.getElementById("detailSearch").oninput=e=>renderDetailTable(currentSheetData, e.target.value);
+    // 智能搜索输入框
+    document.getElementById("detailSearch").oninput = e => {
+      const kw = e.target.value;
+      renderDetailTable(currentSheetData, kw);
+    };
 
-    document.getElementById("exportBtn").onclick=()=>{exportCSV(Object.values(allData).flat().filter(i=>i.stock>0).sort((a,b)=>b.stock-a.stock),"库存排行榜.csv");};
-    document.getElementById("detailExportBtn").onclick=()=>{exportCSV(currentSheetData, document.getElementById("sheetSelect").value+".csv");};
+    // Tab切换
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.onclick = () => {
+        document.querySelectorAll(".tab,.panel").forEach(el => el.classList.remove("active"));
+        tab.classList.add("active");
+        document.getElementById(tab.dataset.tab).classList.add("active");
+      };
+    });
 
-    function exportCSV(items, name){
-      const csv="\uFEFF排名,型号,规格,材质,现库存,单位\n"+items.map((i,idx)=>`${idx+1},${i.type},${i.spec},${i.material||'-'},${i.stock},${i.unit}`).join("\n");
-      const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8;"}));a.download=name;a.click();
+    // 导出
+    document.getElementById("exportBtn").onclick = () => exportCSV(Object.values(allData).flat().filter(i=>i.stock>0).sort((a,b)=>b.stock-a.stock), "全厂库存排行榜.csv");
+    document.getElementById("detailExportBtn").onclick = () => exportCSV(allData[document.getElementById("sheetSelect").value] || [], `${document.getElementById("sheetSelect").value}.csv`);
+
+    function exportCSV(items, filename) {
+      const headers = "\uFEFF序号,型号,规格,材质,现库存,单位\n";
+      const rows = items.map(i => `${i.seq || ''},${i.type},${i.spec},${i.material || '-'},${i.stock},${i.unit}`);
+      const blob = new Blob([headers + rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
     }
 
     lucide.createIcons();
-    loadData();
+    loadExcel();
   </script>
 </body>
 </html>
