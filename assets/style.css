@@ -24,3 +24,36 @@
 .spec { font-family: "Courier New", monospace; color: #fff; overflow: hidden; text-overflow: ellipsis; }
 .material { color: #aaa; text-align: center; }
 .stock { text-align: right; font-weight: bold; font-size: 1.4em; color: #00ff9d; }
+/* 修复前三名文字看不见的问题 */
+.rank-item.top3 {
+  background: linear-gradient(90deg, #00d4ff, #00aacc) !important;
+  color: #000 !important;           /* 文字黑色 */
+  font-weight: bold;
+  font-size: 16px;
+  box-shadow: 0 4px 15px rgba(0, 212, 255, 0.4);
+}
+
+/* 确保前三名所有子元素文字都是黑色 */
+.rank-item.top3 .type,
+.rank-item.top3 .spec,
+.rank-item.top3 .material,
+.rank-item.top3 .stock,
+.rank-item.top3 .rank-num {
+  color: #000 !important;
+  font-weight: bold !important;
+}
+
+/* 普通排名文字保持白色 */
+.rank-item:not(.top3) .type { color: #00d4ff; }
+.rank-item:not(.top3) .spec { color: #fff; }
+.rank-item:not(.top3) .material { color: #aaa; }
+.rank-item:not(.top3) .stock { color: #00ff9d; }
+
+/* 低库存红色边框依然生效 */
+.rank-item.low-stock {
+  border-left: 6px solid #ff4444;
+  background: rgba(255,68,68,0.18) !important;
+}
+.rank-item.low-stock.top3 {
+  border-left: 6px solid #ff0080 !important; /* 前三又是低库存，用更醒目的粉红 */
+}
